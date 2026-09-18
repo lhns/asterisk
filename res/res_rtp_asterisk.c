@@ -1873,6 +1873,11 @@ static int dtls_details_initialize(struct dtls_details *dtls, SSL_CTX *ssl_ctx,
 	}
 	dtls->connection = AST_RTP_DTLS_CONNECTION_NEW;
 
+	/* Jingle peers fragment poorly; pin the DTLS MTU instead of letting OpenSSL probe. */
+	SSL_ctrl(dtls->ssl, SSL_CTRL_SET_MTU, RTP_MTU, NULL);
+	SSL_ctrl(dtls->ssl, DTLS_CTRL_SET_LINK_MTU, RTP_MTU, NULL);
+	SSL_set_options(dtls->ssl, SSL_OP_NO_QUERY_MTU);
+
 	return 0;
 
 error:
