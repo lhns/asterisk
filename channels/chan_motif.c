@@ -300,6 +300,8 @@
 /*! \brief Namespace for XMPP stanzas */
 #define XMPP_STANZAS_NS "urn:ietf:params:xml:ns:xmpp-stanzas"
 
+#define DTLS_NS "urn:xmpp:jingle:apps:dtls:0"
+
 /*! \brief The various transport methods supported, from highest priority to lowest priority when doing fallback */
 enum jingle_transport {
 	JINGLE_TRANSPORT_ICE_UDP = 3,   /*!< XEP-0176 */
@@ -705,6 +707,9 @@ static void jingle_set_owner(struct jingle_session *session, struct ast_channel 
 		ast_rtp_instance_set_channel_id(session->vrtp, session->owner ? ast_channel_uniqueid(session->owner) : "");
 	}
 }
+static struct ast_rtp_dtls_cfg dtls_cfg;
+static struct ast_rtp_dtls_cfg dtls_cfg_video;
+
 
 /*! \brief Internal helper function which enables video support on a session if possible */
 static void jingle_enable_video(struct jingle_session *session)
@@ -728,7 +733,7 @@ static void jingle_enable_video(struct jingle_session *session)
 		return;
 	}
 
-	ast_rtp_instance_set_prop(session->vrtp, AST_RTP_PROPERTY_RTCP, 1);
+	ast_rtp_instance_set_prop(session->vrtp, AST_RTP_PROPERTY_RTCP, AST_RTP_INSTANCE_RTCP_MUX);
 	ast_rtp_instance_set_channel_id(session->vrtp, ast_channel_uniqueid(session->owner));
 	ast_channel_set_fd(session->owner, 2, ast_rtp_instance_fd(session->vrtp, 0));
 	ast_channel_set_fd(session->owner, 3, ast_rtp_instance_fd(session->vrtp, 1));
@@ -736,6 +741,30 @@ static void jingle_enable_video(struct jingle_session *session)
 		ast_format_cap_get_framing(session->cap));
 	if (session->transport == JINGLE_TRANSPORT_GOOGLE_V2 && (ice = ast_rtp_instance_get_ice(session->vrtp))) {
 		ice->stop(session->vrtp);
+	}
+
+	struct ast_rtp_engine_dtls *dtls;
+	if (session->vrtp && (dtls = ast_rtp_instance_get_dtls(session->vrtp))) {
+		dtls_cfg_video.enabled = 1;
+		dtls_cfg_video.default_setup = AST_RTP_DTLS_SETUP_ACTPASS;
+		dtls_cfg_video.hash = AST_RTP_DTLS_HASH_SHA256;
+		dtls_cfg_video.verify = AST_RTP_DTLS_VERIFY_FINGERPRINT;
+		dtls_cfg_video.suite = AST_AES_CM_128_HMAC_SHA1_80;
+		dtls_cfg_video.ephemeral_cert = 1;
+		dtls_cfg_video.certfile = ast_strdup("");
+		dtls_cfg_video.pvtfile = ast_strdup("");
+		dtls_cfg_video.cipher = ast_strdup("");
+		dtls_cfg_video.cafile = ast_strdup("");
+		dtls_cfg_video.capath = ast_strdup("");
+
+		if (dtls->set_configuration(session->vrtp, &dtls_cfg_video)) {
+			ast_log(LOG_ERROR, "Attempted to set an invalid DTLS-SRTP configuration on RTP instance '%p'\n",
+					session->rtp);
+		}
+	}
+	else {
+		ast_log(LOG_ERROR, "No DTLS-SRTP support present on engine for RTP instance '%p', was it compiled with support for it?\n",
+				session->rtp);
 	}
 }
 
@@ -797,8 +826,34 @@ static struct jingle_session *jingle_alloc(struct jingle_endpoint *endpoint, con
 		ao2_ref(session, -1);
 		return NULL;
 	}
+
 	ast_rtp_instance_set_prop(session->rtp, AST_RTP_PROPERTY_RTCP, 1);
 	ast_rtp_instance_set_prop(session->rtp, AST_RTP_PROPERTY_DTMF, 1);
+
+	struct ast_rtp_engine_dtls *dtls;
+
+	if ((dtls = ast_rtp_instance_get_dtls(session->rtp))) {
+		dtls_cfg.enabled = 1;
+		dtls_cfg.default_setup = AST_RTP_DTLS_SETUP_ACTPASS;
+		dtls_cfg.hash = AST_RTP_DTLS_HASH_SHA256;
+		dtls_cfg.verify = AST_RTP_DTLS_VERIFY_FINGERPRINT;
+		dtls_cfg.suite = AST_AES_CM_128_HMAC_SHA1_80;
+		dtls_cfg.ephemeral_cert = 1;
+		dtls_cfg.certfile = ast_strdup("");
+		dtls_cfg.pvtfile = ast_strdup("");
+		dtls_cfg.cipher = ast_strdup("");
+		dtls_cfg.cafile = ast_strdup("");
+		dtls_cfg.capath = ast_strdup("");
+
+		if (dtls->set_configuration(session->rtp, &dtls_cfg)) {
+			ast_log(LOG_ERROR, "Attempted to set an invalid DTLS-SRTP configuration on RTP instance '%p'\n",
+					session->rtp);
+		}
+	}
+	else {
+		ast_log(LOG_ERROR, "No DTLS-SRTP support present on engine for RTP instance '%p', was it compiled with support for it?\n",
+				session->rtp);
+	}
 
 	session->maxicecandidates = endpoint->maxicecandidates;
 	session->maxpayloads = endpoint->maxpayloads;
@@ -956,6 +1011,49 @@ end:
 	iks_delete(response);
 }
 
+static void jingle_add_fingerprint(struct ast_rtp_instance *rtp, iks *transport) {
+	struct ast_rtp_engine_dtls *dtls;
+	if ((dtls = ast_rtp_instance_get_dtls(rtp)) && dtls->active(rtp)) {
+		// Add the DTLS fingerprint in there as well
+		iks *fingerprint_node = NULL;
+		const char *fingerprint;
+		if (!(fingerprint_node = iks_new("fingerprint"))) {
+			ast_log(LOG_ERROR, "Failed to allocate stanzas for DTLS");
+			return;
+		}
+		iks_insert_attrib(fingerprint_node, "xmlns", DTLS_NS);
+		switch (dtls->get_setup(rtp)) {
+			case AST_RTP_DTLS_SETUP_ACTIVE:
+				iks_insert_attrib(fingerprint_node, "setup", "active");
+				break;
+			case AST_RTP_DTLS_SETUP_PASSIVE:
+				iks_insert_attrib(fingerprint_node, "setup", "passive");
+				break;
+			case AST_RTP_DTLS_SETUP_ACTPASS:
+				iks_insert_attrib(fingerprint_node, "setup", "actpass");
+				break;
+			case AST_RTP_DTLS_SETUP_HOLDCONN:
+				iks_insert_attrib(fingerprint_node, "setup", "holdconn");
+				break;
+			default:
+				break;
+		}
+		switch (dtls->get_fingerprint_hash(rtp)) {
+			case AST_RTP_DTLS_HASH_SHA1:
+				iks_insert_attrib(fingerprint_node, "hash", "sha-1");
+				break;
+			case AST_RTP_DTLS_HASH_SHA256:
+				iks_insert_attrib(fingerprint_node, "hash", "sha-256");
+				break;
+			default:
+				break;
+		}
+		fingerprint = dtls->get_fingerprint(rtp);
+		iks_insert_cdata(fingerprint_node, fingerprint, strlen(fingerprint));
+		iks_insert_node(transport, fingerprint_node);
+	}
+}
+
 /*! \brief Internal helper function which adds ICE-UDP candidates to a transport node */
 static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *rtp, iks *transport, iks **candidates, unsigned int maximum)
 {
@@ -971,6 +1069,7 @@ static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *r
 	}
 
 	iks_insert_attrib(transport, "xmlns", JINGLE_ICE_UDP_NS);
+	jingle_add_fingerprint(rtp, transport);
 	iks_insert_attrib(transport, "pwd", ice->get_password(rtp));
 	iks_insert_attrib(transport, "ufrag", ice->get_ufrag(rtp));
 
@@ -1009,7 +1108,9 @@ static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *r
 		}
 
 		iks_insert_node(transport, local_candidate);
-		candidates[i++] = local_candidate;
+		if (candidates != NULL) {
+			candidates[i++] = local_candidate;
+		}
 	}
 
 	ao2_iterator_destroy(&it);
@@ -1250,7 +1351,7 @@ static void jingle_queue_hangup_with_cause(struct jingle_session *session, int c
 }
 
 /*! \brief Internal function which sends a transport-info message */
-static void jingle_send_transport_info(struct jingle_session *session, const char *from)
+static void jingle_send_transport_info(struct jingle_session *session, const char *from, int actually_initiate)
 {
 	iks *iq, *jingle = NULL, *audio = NULL, *audio_transport = NULL, *video = NULL, *video_transport = NULL;
 	iks *audio_candidates[session->maxicecandidates], *video_candidates[session->maxicecandidates];
@@ -1279,7 +1380,7 @@ static void jingle_send_transport_info(struct jingle_session *session, const cha
 		iks_insert_attrib(jingle, "xmlns", GOOGLE_SESSION_NS);
 		iks_insert_attrib(jingle, "initiator", session->outgoing ? session->connection->jid->full : from);
 	} else {
-		iks_insert_attrib(jingle, "action", "transport-info");
+		iks_insert_attrib(jingle, "action", actually_initiate == 1 ? "session-initiate" : "transport-info");
 		iks_insert_attrib(jingle, "sid", session->sid);
 		iks_insert_attrib(jingle, "xmlns", JINGLE_NS);
 	}
@@ -1290,7 +1391,7 @@ static void jingle_send_transport_info(struct jingle_session *session, const cha
 			/* V1 protocol has the candidates directly in the session */
 			res = jingle_add_google_candidates_to_transport(session->rtp, jingle, audio_candidates, 0, session->transport, session->maxicecandidates);
 		} else if ((audio = iks_new("content")) && (audio_transport = iks_new("transport"))) {
-			iks_insert_attrib(audio, "creator", session->outgoing ? "initiator" : "responder");
+			iks_insert_attrib(audio, "creator", "initiator");
 			iks_insert_attrib(audio, "name", session->audio_name);
 			iks_insert_node(jingle, audio);
 			iks_insert_node(audio, audio_transport);
@@ -1308,7 +1409,7 @@ static void jingle_send_transport_info(struct jingle_session *session, const cha
 
 	if ((session->transport != JINGLE_TRANSPORT_GOOGLE_V1) && !res && session->vrtp) {
 		if ((video = iks_new("content")) && (video_transport = iks_new("transport"))) {
-			iks_insert_attrib(video, "creator", session->outgoing ? "initiator" : "responder");
+			iks_insert_attrib(video, "creator", "initiator");
 			iks_insert_attrib(video, "name", session->video_name);
 			iks_insert_node(jingle, video);
 			iks_insert_node(video, video_transport);
@@ -1426,6 +1527,10 @@ static int jingle_add_payloads_to_description(struct jingle_session *session, st
 			payloads[i++] = payload;
 		}
 	}
+	iks *rtcp_mux = iks_new("rtcp-mux");
+	if (rtcp_mux) {
+		iks_insert_node(description, rtcp_mux);
+	}
 
 	return res;
 }
@@ -1437,7 +1542,7 @@ static int jingle_add_content(struct jingle_session *session, iks *jingle, iks *
 	int res = 0;
 
 	if (session->transport != JINGLE_TRANSPORT_GOOGLE_V1) {
-		iks_insert_attrib(content, "creator", session->outgoing ? "initiator" : "responder");
+		iks_insert_attrib(content, "creator", "initiator");
 		iks_insert_attrib(content, "name", name);
 		iks_insert_node(jingle, content);
 
@@ -1458,6 +1563,7 @@ static int jingle_add_content(struct jingle_session *session, iks *jingle, iks *
 	if (!(res = jingle_add_payloads_to_description(session, rtp, description, payloads, type))) {
 		if (session->transport == JINGLE_TRANSPORT_ICE_UDP) {
 			iks_insert_attrib(transport, "xmlns", JINGLE_ICE_UDP_NS);
+			jingle_add_ice_udp_candidates_to_transport(rtp, transport, NULL, session->maxicecandidates);
 			iks_insert_node(content, transport);
 		} else if (session->transport == JINGLE_TRANSPORT_GOOGLE_V2) {
 			iks_insert_attrib(transport, "xmlns", GOOGLE_TRANSPORT_NS);
@@ -1559,6 +1665,17 @@ static void jingle_send_session_initiate(struct jingle_session *session)
 /*! \brief Internal function which sends a session-accept message */
 static void jingle_send_session_accept(struct jingle_session *session)
 {
+	struct ast_rtp_engine_dtls *dtls;
+	if ((dtls = ast_rtp_instance_get_dtls(session->rtp)) && dtls->get_setup(session->rtp) == AST_RTP_DTLS_SETUP_ACTPASS) {
+		// We don't know what the remote wants yet, so just assume both?
+		// This will cause us to reply with active
+		dtls->set_setup(session->rtp, AST_RTP_DTLS_SETUP_ACTPASS);
+	}
+	if (session->vrtp && (dtls = ast_rtp_instance_get_dtls(session->vrtp)) && dtls->get_setup(session->vrtp) == AST_RTP_DTLS_SETUP_ACTPASS) {
+		// We don't know what the remote wants yet, so just assume both?
+		// This will cause us to reply with active
+		dtls->set_setup(session->vrtp, AST_RTP_DTLS_SETUP_ACTPASS);
+	}
 	jingle_send_session_action(session, session->transport == JINGLE_TRANSPORT_GOOGLE_V1 ? "accept" : "session-accept");
 }
 
@@ -1585,7 +1702,7 @@ static int jingle_outgoing_hook(void *data, ikspak *pak)
 		}
 		ao2_unlock(session);
 
-		jingle_send_transport_info(session, iks_find_attrib(pak->x, "from"));
+		jingle_send_transport_info(session, iks_find_attrib(pak->x, "from"), 0);
 
 		goto end;
 	}
@@ -2127,7 +2244,19 @@ static int jingle_interpret_description(struct jingle_session *session, iks *des
 	}
 
 	/* Iterate the codecs updating the relevant RTP instance as we go */
+	struct ast_rtp_engine_ice *ice = ast_rtp_instance_get_ice(session->rtp);
 	for (codec = iks_child(description); codec; codec = iks_next(codec)) {
+		/* <rtcp-mux/> is a sibling of the codec elements, not a codec. Honouring it collapses
+		 * RTP and RTCP onto one ICE component, which is what every browser-side peer offers. */
+		if (strcasecmp(iks_name(codec), "rtcp-mux") == 0) {
+			if (ice) {
+				ast_debug(3, "Enabling RTCP MUX for session '%s'\n", session->sid);
+				ice->change_components(session->rtp, 1);
+			} else {
+				ast_log(LOG_ERROR, "Could not enable RTCP MUX for session '%s': no ICE support\n", session->sid);
+			}
+			continue;
+		}
 		char *id = iks_find_attrib(codec, "id");
 		char *attr_name = iks_find_attrib(codec, "name");
 		char *clockrate = iks_find_attrib(codec, "clockrate");
@@ -2174,10 +2303,53 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 	if (!ast_strlen_zero(ufrag) && !ast_strlen_zero(pwd)) {
 		ice->set_authentication(rtp, ufrag, pwd);
 	}
+	iks *fingerprint_node;
+	if ((fingerprint_node = iks_find_with_attrib(transport, "fingerprint", "xmlns", DTLS_NS))) {
+		char *dtls_hash, *dtls_fingerprint, *dtls_setup;
+		dtls_hash = iks_find_attrib(fingerprint_node, "hash");
+		dtls_fingerprint = iks_cdata(iks_child(fingerprint_node));
+		dtls_setup = iks_find_attrib(fingerprint_node, "setup");
+		if (!ast_strlen_zero(dtls_hash) && !ast_strlen_zero(dtls_fingerprint) && !ast_strlen_zero(dtls_setup)) {
+			struct ast_rtp_engine_dtls *dtls;
+			if ((dtls = ast_rtp_instance_get_dtls(rtp))) {
+				ast_log(LOG_NOTICE, "Received DTLS information on session '%s' (hash %s): %s\n", session->sid, dtls_hash, dtls_fingerprint);
+				if (!strcasecmp(dtls_hash, "sha-1")) {
+					dtls->set_fingerprint(rtp, AST_RTP_DTLS_HASH_SHA1, dtls_fingerprint);
+				} else if (!strcasecmp(dtls_hash, "sha-256")) {
+					dtls->set_fingerprint(rtp, AST_RTP_DTLS_HASH_SHA256, dtls_fingerprint);
+				} else {
+					ast_log(LOG_WARNING, "Unsupported fingerprint hash type '%s' received for session '%s'\n",
+							dtls_hash, session->sid);
+				}
+				if (!strcasecmp(dtls_setup, "active")) {
+					dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_ACTIVE);
+				} else if (!strcasecmp(dtls_setup, "passive")) {
+					dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_PASSIVE);
+				} else if (!strcasecmp(dtls_setup, "actpass")) {
+					dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_ACTPASS);
+				} else if (!strcasecmp(dtls_setup, "holdconn")) {
+					dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_HOLDCONN);
+				} else {
+					ast_log(LOG_WARNING, "Unsupported setup attribute dtls_setup '%s' received for session '%s'\n",
+							dtls_setup, session->sid);
+				}
+			}
+			else {
+				ast_log(LOG_WARNING, "Received DTLS information on session '%s', but it wasn't enabled\n", session->sid);
+			}
+		}
+		else {
+			ast_log(LOG_WARNING, "Invalid DTLS information on session '%s'\n", session->sid);
+		}
+	}
 
 	for (candidate = iks_child(transport); candidate; candidate = iks_next(candidate)) {
+		char *name = iks_name(candidate);
+		if (strcasecmp(name, "candidate") != 0) {
+			continue;
+		}
 		char *component = iks_find_attrib(candidate, "component"), *foundation = iks_find_attrib(candidate, "foundation");
-		char *generation = iks_find_attrib(candidate, "generation"), *id = iks_find_attrib(candidate, "id");
+		char *generation = iks_find_attrib(candidate, "generation");
 		char *ip = iks_find_attrib(candidate, "ip"), *port = iks_find_attrib(candidate, "port");
 		char *priority = iks_find_attrib(candidate, "priority"), *protocol = iks_find_attrib(candidate, "protocol");
 		char *type = iks_find_attrib(candidate, "type");
@@ -2186,7 +2358,7 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 		struct ast_sockaddr remote_address = { { 0, } };
 
 		/* If this candidate is incomplete skip it */
-		if (ast_strlen_zero(component) || ast_strlen_zero(foundation) || ast_strlen_zero(generation) || ast_strlen_zero(id) ||
+		if (ast_strlen_zero(component) || ast_strlen_zero(foundation) || ast_strlen_zero(generation) ||
 		    ast_strlen_zero(ip) || ast_strlen_zero(port) || ast_strlen_zero(priority) ||
 		    ast_strlen_zero(protocol) || ast_strlen_zero(type)) {
 			jingle_queue_hangup_with_cause(session, AST_CAUSE_PROTOCOL_ERROR);
@@ -2200,6 +2372,16 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 			jingle_queue_hangup_with_cause(session, AST_CAUSE_PROTOCOL_ERROR);
 			ast_log(LOG_ERROR, "Invalid ICE-UDP candidate information received on session '%s'\n", session->sid);
 			return -1;
+		}
+
+		// CV - All of our clients support RTCP-MUX
+		// So there should only be 1 component (component 1)
+		// But since we don't actually support trickle, we sometimes
+		// get candidates for component 2, which can monopolize the
+		// whole system, since we think they're the only one.
+		// So for now, just ignore anything that isn't the first one.
+		if (local_candidate.id != 1) {
+			continue;
 		}
 
 		local_candidate.foundation = foundation;
@@ -2340,9 +2522,10 @@ static int jingle_interpret_content(struct jingle_session *session, ikspak *pak)
 		if (session->transport != JINGLE_TRANSPORT_GOOGLE_V1) {
 			/* If this content stanza has no name consider it invalid and move on */
 			if (ast_strlen_zero(name) && !(name = iks_find_attrib(content, "jin:name"))) {
-				jingle_queue_hangup_with_cause(session, AST_CAUSE_BEARERCAPABILITY_NOTAVAIL);
-				ast_log(LOG_ERROR, "Received content without a name on session '%s'\n", session->sid);
-				return -1;
+				//jingle_queue_hangup_with_cause(session, AST_CAUSE_BEARERCAPABILITY_NOTAVAIL);
+				//ast_log(LOG_ERROR, "Received content without a name on session '%s'\n", session->sid);
+				//return -1;
+				continue;
 			}
 
 			/* Try to pre-populate which RTP instance this content is relevant to */
@@ -2493,7 +2676,7 @@ static void jingle_action_session_initiate(struct jingle_endpoint *endpoint, str
 
 		/* Only send a transport-info message if we successfully interpreted the available content */
 		if (!jingle_interpret_content(session, pak)) {
-			jingle_send_transport_info(session, iks_find_attrib(pak->x, "from"));
+			jingle_send_transport_info(session, iks_find_attrib(pak->x, "from"), 0);
 		}
 		break;
 	}
