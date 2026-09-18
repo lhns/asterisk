@@ -56,6 +56,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push
+        id: push
         if: github.event_name != 'pull_request'
         run: |
           set -eu
@@ -64,5 +65,20 @@ jobs:
           docker tag cheogram-asterisk:ci "$IMAGE:$v-${{ steps.v.outputs.sha }}"
           docker push "$IMAGE:$v"
           docker push "$IMAGE:$v-${{ steps.v.outputs.sha }}"
-          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$v")
-          echo "published \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$v" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "published \`$IMAGE:$v\` \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # Proves the registry copy, not just the local one, carries the patches.
+      - name: Verify the published image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -eu
+          ref="$IMAGE@${{ steps.push.outputs.digest }}"
+          docker pull -q "$ref"
+          docker run --rm --entrypoint assert-modules "$ref" chan_motif.so res_xmpp.so res_srtp.so res_rtp_asterisk.so pbx_lua.so res_pjsip.so
+          docker run --rm --entrypoint /usr/sbin/asterisk "$ref" -V
+          for i in cheogram-asterisk:ci "$ref"; do
+            docker run --rm --entrypoint sh "$i" -c 'cd /usr/lib/asterisk/modules && sha256sum chan_motif.so res_xmpp.so res_rtp_asterisk.so res_srtp.so pbx_lua.so res_pjsip.so'
+          done > /tmp/sums
+          diff <(head -6 /tmp/sums) <(tail -6 /tmp/sums) && echo "ok    published modules match the tested build"
