@@ -2472,11 +2472,11 @@ done:
 static int xmpp_client_service_discovery_get_hook(void *data, ikspak *pak)
 {
 	struct ast_xmpp_client *client = data;
-	iks *iq, *disco = NULL, *ident = NULL, *google = NULL, *jingle = NULL, *ice = NULL, *rtp = NULL, *audio = NULL, *video = NULL, *query = NULL;
+	iks *iq, *disco = NULL, *ident = NULL, *google = NULL, *jingle = NULL, *ice = NULL, *rtp = NULL, *audio = NULL, *video = NULL, *query = NULL, *dtls = NULL;
 
 	if (!(iq = iks_new("iq")) || !(query = iks_new("query")) || !(ident = iks_new("identity")) || !(disco = iks_new("feature")) ||
 	    !(google = iks_new("feature")) || !(jingle = iks_new("feature")) || !(ice = iks_new("feature")) || !(rtp = iks_new("feature")) ||
-	    !(audio = iks_new("feature")) || !(video = iks_new("feature"))) {
+	    !(audio = iks_new("feature")) || !(video = iks_new("feature")) || !(dtls = iks_new("feature"))) {
 		ast_log(LOG_ERROR, "Could not allocate memory for responding to service discovery request from '%s' on client '%s'\n",
 			pak->from->full, client->name);
 		goto end;
@@ -2500,6 +2500,7 @@ static int xmpp_client_service_discovery_get_hook(void *data, ikspak *pak)
 	iks_insert_attrib(jingle, "var", "urn:xmpp:jingle:1");
 	iks_insert_attrib(ice, "var", "urn:xmpp:jingle:transports:ice-udp:1");
 	iks_insert_attrib(rtp, "var", "urn:xmpp:jingle:apps:rtp:1");
+	iks_insert_attrib(dtls, "var", "urn:xmpp:jingle:apps:dtls:0");
 	iks_insert_attrib(audio, "var", "urn:xmpp:jingle:apps:rtp:audio");
 	iks_insert_attrib(video, "var", "urn:xmpp:jingle:apps:rtp:video");
 	iks_insert_node(iq, query);
@@ -2509,6 +2510,7 @@ static int xmpp_client_service_discovery_get_hook(void *data, ikspak *pak)
 	iks_insert_node(query, jingle);
 	iks_insert_node(query, ice);
 	iks_insert_node(query, rtp);
+	iks_insert_node(query, dtls);
 	iks_insert_node(query, audio);
 	iks_insert_node(query, video);
 	ast_xmpp_client_send(client, iq);
