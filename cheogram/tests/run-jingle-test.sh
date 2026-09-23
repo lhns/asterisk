@@ -10,7 +10,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)/jingle
 NET=cheogram-jingle-net
 
 cleanup() {
-	docker rm -f jingle-client jingle-ast xmpp >/dev/null 2>&1 || true
+	docker rm -f jingle-client jingle-caller jingle-ast xmpp >/dev/null 2>&1 || true
 	docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -78,6 +78,32 @@ if [ "$rc" != 0 ]; then
 	docker exec jingle-ast tail -60 /var/log/asterisk/messages >&2 || true
 	echo "--- prosody log ---" >&2
 	docker logs xmpp 2>&1 | tail -40 >&2 || true
+	exit 1
+fi
+echo "ok    outbound session-initiate"
+
+# Inbound call: a client session-initiate drives jingle_interpret_description and, on
+# terminate, the RTP instance teardown -- where uninitialized or double-freed ao2 state
+# shows up as FRACK or a crash.
+docker run -d --name jingle-caller --network "$NET" cheogram-test-client python3 -u /client.py call >/dev/null
+timeout 120 docker wait jingle-caller >/dev/null 2>&1 || true
+rc=$(docker inspect -f '{{.State.ExitCode}}' jingle-caller)
+docker logs jingle-caller 2>&1
+fail=0
+[ "$rc" = 0 ] || { echo "FAIL  inbound call did not complete (client exit $rc)" >&2; fail=1; }
+if [ "$(docker inspect -f '{{.State.Running}}' jingle-ast)" != true ]; then
+	echo "FAIL  asterisk is no longer running (exit $(docker inspect -f '{{.State.ExitCode}}' jingle-ast))" >&2
+	fail=1
+elif docker exec jingle-ast grep -nE 'FRACK|bad magic' /var/log/asterisk/messages >&2; then
+	echo "FAIL  ao2 corruption reported in the asterisk log" >&2
+	fail=1
+else
+	echo "ok    asterisk alive, no FRACK in the log"
+fi
+if [ "$fail" != 0 ]; then
+	# docker cp, not exec: it also reads the log of a crashed container.
+	echo "--- asterisk log ---" >&2
+	docker cp jingle-ast:/var/log/asterisk/messages - | tar -xO | tail -60 >&2 || true
 	exit 1
 fi
 echo "jingle stanza test passed"

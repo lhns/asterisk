@@ -24,9 +24,12 @@ RUN make menuselect.makeopts >/dev/null \
 # Serially, and before the parallel build: the bundled pjproject build races against
 # itself under -j and fails with its own output sent to /dev/null.
 RUN make third-party >/tmp/tp.log 2>&1 || (tail -60 /tmp/tp.log; false)
+# CI sets -ftrivial-auto-var-init=pattern on a test-only build, so an uninitialized stack
+# variable is a deterministic crash rather than whatever the stack happened to hold.
+ARG ASTCFLAGS=
 # First diagnostics, not make's trailing summary: that names victim modules and hides
 # the cause -- a full disk reads as a pjsip compile failure.
-RUN make -j"$(nproc)" >/tmp/make.log 2>&1 \
+RUN make -j"$(nproc)" ASTCFLAGS="$ASTCFLAGS" >/tmp/make.log 2>&1 \
  || (grep -nE 'fatal error|error:|No space left|cannot find' /tmp/make.log | head -30; \
      echo '--- tail ---'; tail -60 /tmp/make.log; false)
 # Assert against the built objects, not the source: a hunk can apply and still be
