@@ -2075,7 +2075,9 @@ static struct ast_channel *jingle_request(const char *type, struct ast_format_ca
 static int jingle_interpret_description(struct jingle_session *session, iks *description, const char *name, struct ast_rtp_instance **rtp)
 {
 	char *media = iks_find_attrib(description, "media");
-	struct ast_rtp_codecs codecs;
+	/* ast_rtp_codecs_payloads_initialize() leaves preferred_format and the DTMF fields alone;
+	 * uninitialized, the payloads copy below refs and stores a stack-garbage ao2 pointer. */
+	struct ast_rtp_codecs codecs = AST_RTP_CODECS_NULL_INIT;
 	iks *codec;
 	int othercapability = 0;
 
