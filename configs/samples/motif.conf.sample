@@ -73,6 +73,7 @@ context=incoming-motif ; Default context that incoming sessions will land in
 
 ;maxicecandidates = 10 ; Maximum number of ICE candidates we will offer
 ;maxpayloads = 30      ; Maximum number of payloads we will offer
+;dtlsenable = no       ; Encrypt ice-udp media with DTLS-SRTP (XEP-0320), which clients built on WebRTC require
 
 ; Sample configuration entry for Jingle
 ;[jingle-endpoint](default)
