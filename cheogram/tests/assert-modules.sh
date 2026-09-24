@@ -24,8 +24,10 @@ for m in "$@"; do
 	chan_motif.so)
 		has "$p" 'urn:xmpp:jingle:apps:dtls:0' \
 			|| { echo "FAIL  chan_motif.so lacks the DTLS namespace" >&2; fail=1; }
-		has "$p" 'Enabling RTCP MUX for session' \
+		has "$p" 'rtcp-mux' \
 			|| { echo "FAIL  chan_motif.so lacks the RTCP-MUX path" >&2; fail=1; }
+		has "$p" 'dtlsenable' \
+			|| { echo "FAIL  chan_motif.so lacks the dtlsenable option" >&2; fail=1; }
 		;;
 	res_xmpp.so)
 		has "$p" 'urn:xmpp:jingle:apps:dtls:0' \

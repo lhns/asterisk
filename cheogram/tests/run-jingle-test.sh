@@ -2,10 +2,13 @@
 # Tier 3: prosody + this Asterisk + a scripted XMPP client. Asserts the session-initiate
 # Asterisk emits actually carries a DTLS fingerprint and rtcp-mux -- i.e. that the patched
 # code runs, not that its strings are in the binary.
-# Usage: run-jingle-test.sh <image>
+# Usage: run-jingle-test.sh <image> [nodtls]
+# nodtls runs the same calls with dtlsenable=no, which must still work, without a fingerprint.
 set -euo pipefail
 
-IMAGE=${1:?usage: run-jingle-test.sh <image>}
+IMAGE=${1:?usage: run-jingle-test.sh <image> [nodtls]}
+DTLS=yes
+[ "${2:-}" = nodtls ] && DTLS=no
 HERE=$(cd "$(dirname "$0")" && pwd)/jingle
 NET=cheogram-jingle-net
 
@@ -26,8 +29,15 @@ for _ in $(seq 1 40); do
 	sleep 1
 done
 
-docker run -d --name jingle-ast --network "$NET" \
-	-v "$HERE/asterisk:/etc/asterisk:ro" "$IMAGE" -f >/dev/null
+# Copied rather than bind-mounted, so the dtlsenable variant needs no second config tree.
+docker create --name jingle-ast --network "$NET" "$IMAGE" -f >/dev/null
+docker cp -q "$HERE/asterisk/." jingle-ast:/etc/asterisk/
+motif=$(mktemp)
+sed "s/^dtlsenable=.*/dtlsenable=$DTLS/" "$HERE/asterisk/motif.conf" > "$motif"
+chmod 644 "$motif"
+docker cp -q "$motif" jingle-ast:/etc/asterisk/motif.conf
+rm -f "$motif"
+docker start jingle-ast >/dev/null
 
 ready=0
 for _ in $(seq 1 60); do
@@ -51,7 +61,7 @@ for _ in $(seq 1 30); do
 done
 [ "$linked" = 1 ] || echo "warn  xmpp show connections did not list the component" >&2
 
-docker run -d --name jingle-client --network "$NET" cheogram-test-client >/dev/null
+docker run -d --name jingle-client --network "$NET" -e "DTLS=$DTLS" cheogram-test-client >/dev/null
 online=0
 for _ in $(seq 1 60); do
 	docker logs jingle-client 2>&1 | grep -q 'CLIENT ONLINE' && { online=1; break; }
@@ -85,7 +95,7 @@ echo "ok    outbound session-initiate"
 # Inbound call: a client session-initiate drives jingle_interpret_description and, on
 # terminate, the RTP instance teardown -- where uninitialized or double-freed ao2 state
 # shows up as FRACK or a crash.
-docker run -d --name jingle-caller --network "$NET" cheogram-test-client python3 -u /client.py call >/dev/null
+docker run -d --name jingle-caller --network "$NET" -e "DTLS=$DTLS" cheogram-test-client python3 -u /client.py call >/dev/null
 timeout 120 docker wait jingle-caller >/dev/null 2>&1 || true
 rc=$(docker inspect -f '{{.State.ExitCode}}' jingle-caller)
 docker logs jingle-caller 2>&1
@@ -97,8 +107,11 @@ if [ "$(docker inspect -f '{{.State.Running}}' jingle-ast)" != true ]; then
 elif docker exec jingle-ast grep -nE 'FRACK|bad magic' /var/log/asterisk/messages >&2; then
 	echo "FAIL  ao2 corruption reported in the asterisk log" >&2
 	fail=1
+elif docker exec jingle-ast grep -nE '(ERROR|WARNING)\[.*chan_motif\.c' /var/log/asterisk/messages >&2; then
+	echo "FAIL  chan_motif logged errors or warnings for a well-formed call" >&2
+	fail=1
 else
-	echo "ok    asterisk alive, no FRACK in the log"
+	echo "ok    asterisk alive, no FRACK and no chan_motif warnings in the log"
 fi
 if [ "$fail" != 0 ]; then
 	# docker cp, not exec: it also reads the log of a crashed container.
@@ -106,4 +119,4 @@ if [ "$fail" != 0 ]; then
 	docker cp jingle-ast:/var/log/asterisk/messages - | tar -xO | tail -60 >&2 || true
 	exit 1
 fi
-echo "jingle stanza test passed"
+echo "jingle stanza test passed (dtlsenable=$DTLS)"

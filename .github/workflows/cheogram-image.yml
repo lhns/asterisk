@@ -48,6 +48,9 @@ jobs:
       - name: Jingle stanza test
         run: cheogram/tests/run-jingle-test.sh cheogram-asterisk:ci
 
+      - name: Jingle stanza test (dtlsenable=no)
+        run: cheogram/tests/run-jingle-test.sh cheogram-asterisk:ci nodtls
+
       # Test-only, never pushed: uninitialized stack variables become a deterministic crash
       # instead of depending on what the stack held, which is how chan_motif's did.
       - name: Build (pattern-initialized stack)
@@ -63,6 +66,9 @@ jobs:
 
       - name: Jingle stanza test (pattern-initialized stack)
         run: cheogram/tests/run-jingle-test.sh cheogram-asterisk:ci-pattern
+
+      - name: Jingle stanza test (pattern-initialized stack, dtlsenable=no)
+        run: cheogram/tests/run-jingle-test.sh cheogram-asterisk:ci-pattern nodtls
 
       - uses: docker/login-action@v3
         if: github.event_name != 'pull_request'
