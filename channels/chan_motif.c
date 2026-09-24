@@ -253,6 +253,20 @@
 					</since>
 					<synopsis>Maximum number of payloads to offer</synopsis>
 				</configOption>
+				<configOption name="dtlsenable" default="no">
+					<since>
+						<version>20.23.0</version>
+						<version>22.13.0</version>
+						<version>23.7.0</version>
+						<version>24.1.0</version>
+					</since>
+					<synopsis>Encrypt media with DTLS-SRTP</synopsis>
+					<description>
+						<para>Negotiate DTLS-SRTP as defined in XEP-0320 on <literal>ice-udp</literal>
+						sessions, using an automatically generated certificate that is verified
+						by its fingerprint. Clients built on WebRTC require it.</para>
+					</description>
+				</configOption>
 			</configObject>
 		</configFile>
 	</configInfo>
@@ -300,6 +314,9 @@
 /*! \brief Namespace for XMPP stanzas */
 #define XMPP_STANZAS_NS "urn:ietf:params:xml:ns:xmpp-stanzas"
 
+/*! \brief Namespace for Jingle DTLS-SRTP, XEP-0320 */
+#define JINGLE_DTLS_NS "urn:xmpp:jingle:apps:dtls:0"
+
 /*!
  * \brief Creator of every content, see XEP-0166
  *
@@ -340,6 +357,7 @@ struct jingle_endpoint {
 	ast_group_t pickupgroup;                /*!< Pickup group */
 	enum jingle_transport transport;        /*!< Default transport to use on outgoing sessions */
 	struct jingle_endpoint_state *state;    /*!< Endpoint state information */
+	struct ast_rtp_dtls_cfg dtls_cfg;       /*!< DTLS-SRTP configuration */
 };
 
 /*! \brief Session which contains information about an active session */
@@ -366,6 +384,7 @@ struct jingle_session {
 	unsigned int outgoing:1;              /*!< Whether this is an outgoing leg or not */
 	unsigned int gone:1;                  /*!< In the eyes of Jingle this session is already gone */
 	ast_callid callid;                    /*!< Bound session call-id */
+	struct ast_rtp_dtls_cfg dtls_cfg;     /*!< DTLS-SRTP configuration, also needed when video is enabled later */
 };
 
 static const char channel_type[] = "Motif";
@@ -502,6 +521,7 @@ static void jingle_endpoint_destructor(void *obj)
 
 	ao2_cleanup(endpoint->cap);
 	ao2_ref(endpoint->state, -1);
+	ast_rtp_dtls_cfg_free(&endpoint->dtls_cfg);
 
 	ast_string_field_free_memory(endpoint);
 }
@@ -569,6 +589,13 @@ static void *jingle_endpoint_alloc(const char *cat)
 	endpoint->cap = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT);
 	endpoint->transport = JINGLE_TRANSPORT_ICE_UDP;
 
+	/* XEP-0320 authenticates the certificate by its fingerprint alone */
+	endpoint->dtls_cfg.default_setup = AST_RTP_DTLS_SETUP_ACTPASS;
+	endpoint->dtls_cfg.hash = AST_RTP_DTLS_HASH_SHA256;
+	endpoint->dtls_cfg.verify = AST_RTP_DTLS_VERIFY_FINGERPRINT;
+	endpoint->dtls_cfg.suite = AST_AES_CM_128_HMAC_SHA1_80;
+	endpoint->dtls_cfg.ephemeral_cert = 1;
+
 	return endpoint;
 }
 
@@ -633,6 +660,7 @@ static void jingle_session_destructor(void *obj)
 	ao2_cleanup(session->cap);
 	ao2_cleanup(session->jointcap);
 	ao2_cleanup(session->peercap);
+	ast_rtp_dtls_cfg_free(&session->dtls_cfg);
 
 	ast_string_field_free_memory(session);
 }
@@ -714,6 +742,30 @@ static void jingle_set_owner(struct jingle_session *session, struct ast_channel 
 	}
 }
 
+/*! \brief Internal helper function which enables DTLS-SRTP on an RTP instance if configured */
+static void jingle_enable_dtls(struct jingle_session *session, struct ast_rtp_instance *rtp)
+{
+	static int unsupported_logged;
+	struct ast_rtp_engine_dtls *dtls;
+
+	/* The Google transports have no way to carry a fingerprint */
+	if (!session->dtls_cfg.enabled || (session->transport != JINGLE_TRANSPORT_ICE_UDP)) {
+		return;
+	}
+
+	if (!(dtls = ast_rtp_instance_get_dtls(rtp))) {
+		if (!unsupported_logged) {
+			ast_log(LOG_WARNING, "DTLS-SRTP is enabled but the RTP engine does not support it, continuing without\n");
+			unsupported_logged = 1;
+		}
+		return;
+	}
+
+	if (dtls->set_configuration(rtp, &session->dtls_cfg)) {
+		ast_log(LOG_WARNING, "Could not set up DTLS-SRTP on session '%s', continuing without\n", session->sid);
+	}
+}
+
 /*! \brief Internal helper function which enables video support on a session if possible */
 static void jingle_enable_video(struct jingle_session *session)
 {
@@ -745,6 +797,8 @@ static void jingle_enable_video(struct jingle_session *session)
 	if (session->transport == JINGLE_TRANSPORT_GOOGLE_V2 && (ice = ast_rtp_instance_get_ice(session->vrtp))) {
 		ice->stop(session->vrtp);
 	}
+
+	jingle_enable_dtls(session, session->vrtp);
 }
 
 /*! \brief Internal helper function used to allocate Jingle session on an endpoint */
@@ -807,6 +861,9 @@ static struct jingle_session *jingle_alloc(struct jingle_endpoint *endpoint, con
 	}
 	ast_rtp_instance_set_prop(session->rtp, AST_RTP_PROPERTY_RTCP, 1);
 	ast_rtp_instance_set_prop(session->rtp, AST_RTP_PROPERTY_DTMF, 1);
+
+	ast_rtp_dtls_cfg_copy(&endpoint->dtls_cfg, &session->dtls_cfg);
+	jingle_enable_dtls(session, session->rtp);
 
 	session->maxicecandidates = endpoint->maxicecandidates;
 	session->maxpayloads = endpoint->maxpayloads;
@@ -964,6 +1021,100 @@ end:
 	iks_delete(response);
 }
 
+/*! \brief Internal helper function which adds the local DTLS fingerprint to a transport node */
+static void jingle_add_fingerprint(struct ast_rtp_instance *rtp, iks *transport)
+{
+	struct ast_rtp_engine_dtls *dtls = ast_rtp_instance_get_dtls(rtp);
+	const char *setup = NULL, *hash = NULL, *value;
+	iks *fingerprint;
+
+	if (!dtls || !dtls->active(rtp)) {
+		return;
+	}
+
+	switch (dtls->get_setup(rtp)) {
+	case AST_RTP_DTLS_SETUP_ACTIVE:
+		setup = "active";
+		break;
+	case AST_RTP_DTLS_SETUP_PASSIVE:
+		setup = "passive";
+		break;
+	case AST_RTP_DTLS_SETUP_ACTPASS:
+		setup = "actpass";
+		break;
+	case AST_RTP_DTLS_SETUP_HOLDCONN:
+		setup = "holdconn";
+		break;
+	}
+
+	switch (dtls->get_fingerprint_hash(rtp)) {
+	case AST_RTP_DTLS_HASH_SHA1:
+		hash = "sha-1";
+		break;
+	case AST_RTP_DTLS_HASH_SHA256:
+		hash = "sha-256";
+		break;
+	}
+
+	value = dtls->get_fingerprint(rtp);
+	if (!setup || !hash || ast_strlen_zero(value) || !(fingerprint = iks_insert(transport, "fingerprint"))) {
+		return;
+	}
+
+	iks_insert_attrib(fingerprint, "xmlns", JINGLE_DTLS_NS);
+	iks_insert_attrib(fingerprint, "setup", setup);
+	iks_insert_attrib(fingerprint, "hash", hash);
+	iks_insert_cdata(fingerprint, value, strlen(value));
+}
+
+/*! \brief Internal helper function which applies the remote DTLS fingerprint in a transport node */
+static void jingle_interpret_fingerprint(struct jingle_session *session, iks *transport, struct ast_rtp_instance *rtp)
+{
+	struct ast_rtp_engine_dtls *dtls = ast_rtp_instance_get_dtls(rtp);
+	iks *fingerprint = iks_find_with_attrib(transport, "fingerprint", "xmlns", JINGLE_DTLS_NS);
+	char *hash, *setup, *value;
+
+	if (!fingerprint) {
+		return;
+	}
+
+	if (!dtls || !dtls->active(rtp)) {
+		ast_debug(3, "Ignoring DTLS fingerprint on session '%s' as DTLS-SRTP is not enabled\n", session->sid);
+		return;
+	}
+
+	hash = iks_find_attrib(fingerprint, "hash");
+	setup = iks_find_attrib(fingerprint, "setup");
+	value = iks_cdata(iks_child(fingerprint));
+
+	if (ast_strlen_zero(hash) || ast_strlen_zero(setup) || ast_strlen_zero(value)) {
+		ast_log(LOG_WARNING, "Incomplete DTLS fingerprint received on session '%s'\n", session->sid);
+		return;
+	}
+
+	ast_debug(3, "Received DTLS fingerprint on session '%s' (hash %s, setup %s): %s\n", session->sid, hash, setup, value);
+
+	if (!strcasecmp(hash, "sha-1")) {
+		dtls->set_fingerprint(rtp, AST_RTP_DTLS_HASH_SHA1, value);
+	} else if (!strcasecmp(hash, "sha-256")) {
+		dtls->set_fingerprint(rtp, AST_RTP_DTLS_HASH_SHA256, value);
+	} else {
+		ast_log(LOG_WARNING, "Unsupported DTLS fingerprint hash '%s' received on session '%s'\n", hash, session->sid);
+	}
+
+	if (!strcasecmp(setup, "active")) {
+		dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_ACTIVE);
+	} else if (!strcasecmp(setup, "passive")) {
+		dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_PASSIVE);
+	} else if (!strcasecmp(setup, "actpass")) {
+		dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_ACTPASS);
+	} else if (!strcasecmp(setup, "holdconn")) {
+		dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_HOLDCONN);
+	} else {
+		ast_log(LOG_WARNING, "Unsupported DTLS setup '%s' received on session '%s'\n", setup, session->sid);
+	}
+}
+
 /*! \brief Internal helper function which adds ICE-UDP candidates to a transport node */
 static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *rtp, iks *transport, iks **candidates, unsigned int maximum)
 {
@@ -982,6 +1133,7 @@ static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *r
 	iks_insert_attrib(transport, "xmlns", JINGLE_ICE_UDP_NS);
 	iks_insert_attrib(transport, "pwd", ice->get_password(rtp));
 	iks_insert_attrib(transport, "ufrag", ice->get_ufrag(rtp));
+	jingle_add_fingerprint(rtp, transport);
 
 	it = ao2_iterator_init(local_candidates, 0);
 
@@ -1584,9 +1736,29 @@ static void jingle_send_session_initiate(struct jingle_session *session)
 	jingle_send_session_action(session, session->transport == JINGLE_TRANSPORT_GOOGLE_V1 ? "initiate" : "session-initiate");
 }
 
+/*!
+ * \brief Internal helper function which settles the DTLS role before accepting a session
+ *
+ * The answer must not be actpass (RFC 5763). If the peer has not sent a fingerprint yet
+ * assume it would have offered actpass, which makes us active.
+ */
+static void jingle_dtls_settle_setup(struct ast_rtp_instance *rtp)
+{
+	struct ast_rtp_engine_dtls *dtls = ast_rtp_instance_get_dtls(rtp);
+
+	if (dtls && dtls->active(rtp) && (dtls->get_setup(rtp) == AST_RTP_DTLS_SETUP_ACTPASS)) {
+		dtls->set_setup(rtp, AST_RTP_DTLS_SETUP_ACTPASS);
+	}
+}
+
 /*! \brief Internal function which sends a session-accept message */
 static void jingle_send_session_accept(struct jingle_session *session)
 {
+	jingle_dtls_settle_setup(session->rtp);
+	if (session->vrtp) {
+		jingle_dtls_settle_setup(session->vrtp);
+	}
+
 	jingle_send_session_action(session, session->transport == JINGLE_TRANSPORT_GOOGLE_V1 ? "accept" : "session-accept");
 }
 
@@ -2226,6 +2398,8 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 		ice->set_authentication(rtp, ufrag, pwd);
 	}
 
+	jingle_interpret_fingerprint(session, transport, rtp);
+
 	for (candidate = iks_child(transport); candidate; candidate = iks_next(candidate)) {
 		char *component = iks_find_attrib(candidate, "component"), *foundation = iks_find_attrib(candidate, "foundation");
 		char *generation = iks_find_attrib(candidate, "generation");
@@ -2825,6 +2999,14 @@ static int custom_transport_handler(const struct aco_option *opt, struct ast_var
 	return 0;
 }
 
+/*! \brief Custom handler for DTLS-SRTP options */
+static int custom_dtls_handler(const struct aco_option *opt, struct ast_variable *var, void *obj)
+{
+	struct jingle_endpoint *endpoint = obj;
+
+	return ast_rtp_dtls_cfg_parse(&endpoint->dtls_cfg, var->name, var->value);
+}
+
 /*!
  * \brief Load the module
  *
@@ -2861,6 +3043,7 @@ static int load_module(void)
 			    FLDSET(struct jingle_endpoint, maxicecandidates), DEFAULT_MAX_ICE_CANDIDATES);
 	aco_option_register(&cfg_info, "maxpayloads", ACO_EXACT, endpoint_options, DEFAULT_MAX_PAYLOADS, OPT_UINT_T, PARSE_DEFAULT,
 			    FLDSET(struct jingle_endpoint, maxpayloads), DEFAULT_MAX_PAYLOADS);
+	aco_option_register_custom(&cfg_info, "dtlsenable", ACO_EXACT, endpoint_options, "no", custom_dtls_handler, 0);
 
 	ast_format_cap_append_by_type(jingle_tech.capabilities, AST_MEDIA_TYPE_AUDIO);
 
