@@ -1440,7 +1440,7 @@ static int jingle_add_payloads_to_description(struct jingle_session *session, st
 
 /*! \brief Helper function which adds content to a description */
 static int jingle_add_content(struct jingle_session *session, iks *jingle, iks *content, iks *description, iks *transport,
-			      const char *name, enum ast_media_type type, struct ast_rtp_instance *rtp, iks **payloads)
+			      const char *name, enum ast_media_type type, struct ast_rtp_instance *rtp, iks **payloads, iks **candidates)
 {
 	int res = 0;
 
@@ -1465,7 +1465,8 @@ static int jingle_add_content(struct jingle_session *session, iks *jingle, iks *
 
 	if (!(res = jingle_add_payloads_to_description(session, rtp, description, payloads, type))) {
 		if (session->transport == JINGLE_TRANSPORT_ICE_UDP) {
-			iks_insert_attrib(transport, "xmlns", JINGLE_ICE_UDP_NS);
+			/* XEP-0176 carries the ICE credentials and candidates here too, not only in transport-info */
+			res = jingle_add_ice_udp_candidates_to_transport(rtp, transport, candidates, session->maxicecandidates);
 			iks_insert_node(content, transport);
 		} else if (session->transport == JINGLE_TRANSPORT_GOOGLE_V2) {
 			iks_insert_attrib(transport, "xmlns", GOOGLE_TRANSPORT_NS);
@@ -1481,6 +1482,7 @@ static void jingle_send_session_action(struct jingle_session *session, const cha
 {
 	iks *iq, *jingle, *audio = NULL, *audio_description = NULL, *video = NULL, *video_description = NULL;
 	iks *audio_payloads[session->maxpayloads], *video_payloads[session->maxpayloads];
+	iks *audio_candidates[session->maxicecandidates], *video_candidates[session->maxicecandidates];
 	iks *audio_transport = NULL, *video_transport = NULL;
 	int i, res = 0;
 
@@ -1493,6 +1495,8 @@ static void jingle_send_session_action(struct jingle_session *session, const cha
 
 	memset(audio_payloads, 0, sizeof(audio_payloads));
 	memset(video_payloads, 0, sizeof(video_payloads));
+	memset(audio_candidates, 0, sizeof(audio_candidates));
+	memset(video_candidates, 0, sizeof(video_candidates));
 
 	iks_insert_attrib(iq, "from", session->connection->jid->full);
 	iks_insert_attrib(iq, "to", session->remote);
@@ -1519,7 +1523,7 @@ static void jingle_send_session_action(struct jingle_session *session, const cha
 	if (session->rtp && (audio = iks_new("content")) && (audio_description = iks_new("description")) &&
 	    (audio_transport = iks_new("transport"))) {
 		res = jingle_add_content(session, jingle, audio, audio_description, audio_transport, session->audio_name,
-					 AST_MEDIA_TYPE_AUDIO, session->rtp, audio_payloads);
+					 AST_MEDIA_TYPE_AUDIO, session->rtp, audio_payloads, audio_candidates);
 	} else {
 		ast_log(LOG_ERROR, "Failed to allocate audio content stanzas for session '%s', hanging up\n", session->sid);
 		res = -1;
@@ -1529,7 +1533,7 @@ static void jingle_send_session_action(struct jingle_session *session, const cha
 		if ((video = iks_new("content")) && (video_description = iks_new("description")) &&
 		    (video_transport = iks_new("transport"))) {
 			res = jingle_add_content(session, jingle, video, video_description, video_transport, session->video_name,
-						 AST_MEDIA_TYPE_VIDEO, session->vrtp, video_payloads);
+						 AST_MEDIA_TYPE_VIDEO, session->vrtp, video_payloads, video_candidates);
 		} else {
 			ast_log(LOG_ERROR, "Failed to allocate video content stanzas for session '%s', hanging up\n", session->sid);
 			res = -1;
@@ -1548,6 +1552,11 @@ static void jingle_send_session_action(struct jingle_session *session, const cha
 	for (i = 0; i < session->maxpayloads; i++) {
 		iks_delete(video_payloads[i]);
 		iks_delete(audio_payloads[i]);
+	}
+
+	for (i = 0; i < session->maxicecandidates; i++) {
+		iks_delete(video_candidates[i]);
+		iks_delete(audio_candidates[i]);
 	}
 
 	iks_delete(video_description);
