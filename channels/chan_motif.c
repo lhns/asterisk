@@ -2177,7 +2177,7 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 
 	for (candidate = iks_child(transport); candidate; candidate = iks_next(candidate)) {
 		char *component = iks_find_attrib(candidate, "component"), *foundation = iks_find_attrib(candidate, "foundation");
-		char *generation = iks_find_attrib(candidate, "generation"), *id = iks_find_attrib(candidate, "id");
+		char *generation = iks_find_attrib(candidate, "generation");
 		char *ip = iks_find_attrib(candidate, "ip"), *port = iks_find_attrib(candidate, "port");
 		char *priority = iks_find_attrib(candidate, "priority"), *protocol = iks_find_attrib(candidate, "protocol");
 		char *type = iks_find_attrib(candidate, "type");
@@ -2185,8 +2185,13 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 		int real_port;
 		struct ast_sockaddr remote_address = { { 0, } };
 
-		/* If this candidate is incomplete skip it */
-		if (ast_strlen_zero(component) || ast_strlen_zero(foundation) || ast_strlen_zero(generation) || ast_strlen_zero(id) ||
+		/* The transport may carry other elements, such as a DTLS fingerprint */
+		if (iks_strcmp(iks_name(candidate), "candidate")) {
+			continue;
+		}
+
+		/* If this candidate is incomplete skip it, the candidate id is not required as it is never used */
+		if (ast_strlen_zero(component) || ast_strlen_zero(foundation) || ast_strlen_zero(generation) ||
 		    ast_strlen_zero(ip) || ast_strlen_zero(port) || ast_strlen_zero(priority) ||
 		    ast_strlen_zero(protocol) || ast_strlen_zero(type)) {
 			jingle_queue_hangup_with_cause(session, AST_CAUSE_PROTOCOL_ERROR);
@@ -2340,6 +2345,10 @@ static int jingle_interpret_content(struct jingle_session *session, ikspak *pak)
 		if (session->transport != JINGLE_TRANSPORT_GOOGLE_V1) {
 			/* If this content stanza has no name consider it invalid and move on */
 			if (ast_strlen_zero(name) && !(name = iks_find_attrib(content, "jin:name"))) {
+				/* Other children of the jingle element, such as a BUNDLE group, are not content */
+				if (iks_strcmp(iks_name(content), "content")) {
+					continue;
+				}
 				jingle_queue_hangup_with_cause(session, AST_CAUSE_BEARERCAPABILITY_NOTAVAIL);
 				ast_log(LOG_ERROR, "Received content without a name on session '%s'\n", session->sid);
 				return -1;
