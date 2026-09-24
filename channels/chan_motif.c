@@ -972,6 +972,7 @@ static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *r
 	struct ao2_iterator it;
 	struct ast_rtp_engine_ice_candidate *candidate;
 	int i = 0, res = 0;
+	int rtcp_mux = ast_rtp_instance_get_prop(rtp, AST_RTP_PROPERTY_RTCP) == AST_RTP_INSTANCE_RTCP_MUX;
 
 	if (!(ice = ast_rtp_instance_get_ice(rtp)) || !(local_candidates = ice->get_local_candidates(rtp))) {
 		ast_log(LOG_ERROR, "Unable to add ICE-UDP candidates as ICE support not available or no candidates available\n");
@@ -987,6 +988,10 @@ static int jingle_add_ice_udp_candidates_to_transport(struct ast_rtp_instance *r
 	while ((candidate = ao2_iterator_next(&it)) && (i < maximum)) {
 		iks *local_candidate;
 		char tmp[30];
+
+		if (rtcp_mux && (candidate->id > 1)) {
+			continue;
+		}
 
 		if (!(local_candidate = iks_new("candidate"))) {
 			res = -1;
@@ -1433,6 +1438,12 @@ static int jingle_add_payloads_to_description(struct jingle_session *session, st
 			iks_insert_node(description, payload);
 			payloads[i++] = payload;
 		}
+	}
+
+	/* Offer rtcp-mux (XEP-0167) on outgoing sessions, and only accept it on incoming ones if it was offered */
+	if ((session->transport == JINGLE_TRANSPORT_ICE_UDP) &&
+	    (session->outgoing || ast_rtp_instance_get_prop(rtp, AST_RTP_PROPERTY_RTCP) == AST_RTP_INSTANCE_RTCP_MUX)) {
+		iks_insert(description, "rtcp-mux");
 	}
 
 	return res;
@@ -2088,6 +2099,19 @@ static struct ast_channel *jingle_request(const char *type, struct ast_format_ca
 	return chan;
 }
 
+/*! \brief Internal helper function which switches an RTP instance to rtcp-mux */
+static void jingle_enable_rtcp_mux(struct ast_rtp_instance *rtp)
+{
+	struct ast_rtp_engine_ice *ice = ast_rtp_instance_get_ice(rtp);
+
+	ast_rtp_instance_set_prop(rtp, AST_RTP_PROPERTY_RTCP, AST_RTP_INSTANCE_RTCP_MUX);
+
+	/* RTCP no longer needs an ICE component of its own */
+	if (ice) {
+		ice->change_components(rtp, 1);
+	}
+}
+
 /*! \brief Helper function which handles content descriptions */
 static int jingle_interpret_description(struct jingle_session *session, iks *description, const char *name, struct ast_rtp_instance **rtp)
 {
@@ -2097,6 +2121,7 @@ static int jingle_interpret_description(struct jingle_session *session, iks *des
 	struct ast_rtp_codecs codecs = AST_RTP_CODECS_NULL_INIT;
 	iks *codec;
 	int othercapability = 0;
+	int rtcp_mux = 0;
 
 	/* Google-V1 is always carrying audio, but just doesn't tell us so */
 	if (session->transport == JINGLE_TRANSPORT_GOOGLE_V1) {
@@ -2152,6 +2177,11 @@ static int jingle_interpret_description(struct jingle_session *session, iks *des
 		char *clockrate = iks_find_attrib(codec, "clockrate");
 		int rtp_id, rtp_clockrate;
 
+		if (!iks_strcmp(iks_name(codec), "rtcp-mux")) {
+			rtcp_mux = 1;
+			continue;
+		}
+
 		if (!ast_strlen_zero(id) && !ast_strlen_zero(attr_name) && (sscanf(id, "%30d", &rtp_id) == 1)) {
 			if (!ast_strlen_zero(clockrate) && (sscanf(clockrate, "%30d", &rtp_clockrate) == 1)) {
 				ast_rtp_codecs_payloads_set_rtpmap_type_rate(&codecs, NULL, rtp_id, media, attr_name, 0, rtp_clockrate);
@@ -2173,6 +2203,10 @@ static int jingle_interpret_description(struct jingle_session *session, iks *des
 
 	ast_rtp_codecs_payloads_copy(&codecs, ast_rtp_instance_get_codecs(*rtp), *rtp);
 	ast_rtp_codecs_payloads_destroy(&codecs);
+
+	if (rtcp_mux && (session->transport == JINGLE_TRANSPORT_ICE_UDP)) {
+		jingle_enable_rtcp_mux(*rtp);
+	}
 
 	return 0;
 }
@@ -2224,6 +2258,12 @@ static int jingle_interpret_ice_udp_transport(struct jingle_session *session, ik
 			jingle_queue_hangup_with_cause(session, AST_CAUSE_PROTOCOL_ERROR);
 			ast_log(LOG_ERROR, "Invalid ICE-UDP candidate information received on session '%s'\n", session->sid);
 			return -1;
+		}
+
+		/* A peer offering rtcp-mux may still send candidates for an RTCP component */
+		if ((local_candidate.id > 1) &&
+		    (ast_rtp_instance_get_prop(rtp, AST_RTP_PROPERTY_RTCP) == AST_RTP_INSTANCE_RTCP_MUX)) {
+			continue;
 		}
 
 		local_candidate.foundation = foundation;
