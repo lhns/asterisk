@@ -2490,6 +2490,13 @@ static void jingle_action_session_initiate(struct jingle_endpoint *endpoint, str
 
 	ao2_link(endpoint->state->sessions, session);
 
+	/* Interpret the offer before the dialplan runs, or it could answer before anything is negotiated */
+	if (jingle_interpret_content(session, pak)) {
+		jingle_send_response(endpoint->connection, pak);
+		ast_hangup(chan);
+		return;
+	}
+
 	ast_channel_lock(chan);
 	ast_setstate(chan, AST_STATE_RING);
 	ast_channel_unlock(chan);
@@ -2509,11 +2516,7 @@ static void jingle_action_session_initiate(struct jingle_endpoint *endpoint, str
 		break;
 	case AST_PBX_SUCCESS:
 		jingle_send_response(endpoint->connection, pak);
-
-		/* Only send a transport-info message if we successfully interpreted the available content */
-		if (!jingle_interpret_content(session, pak)) {
-			jingle_send_transport_info(session, iks_find_attrib(pak->x, "from"));
-		}
+		jingle_send_transport_info(session, iks_find_attrib(pak->x, "from"));
 		break;
 	}
 }
