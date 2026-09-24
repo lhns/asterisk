@@ -300,6 +300,14 @@
 /*! \brief Namespace for XMPP stanzas */
 #define XMPP_STANZAS_NS "urn:ietf:params:xml:ns:xmpp-stanzas"
 
+/*!
+ * \brief Creator of every content, see XEP-0166
+ *
+ * chan_motif never adds content after session-initiate, so all content was
+ * created by the initiator, whichever side that was.
+ */
+#define JINGLE_CONTENT_CREATOR "initiator"
+
 /*! \brief The various transport methods supported, from highest priority to lowest priority when doing fallback */
 enum jingle_transport {
 	JINGLE_TRANSPORT_ICE_UDP = 3,   /*!< XEP-0176 */
@@ -1290,7 +1298,7 @@ static void jingle_send_transport_info(struct jingle_session *session, const cha
 			/* V1 protocol has the candidates directly in the session */
 			res = jingle_add_google_candidates_to_transport(session->rtp, jingle, audio_candidates, 0, session->transport, session->maxicecandidates);
 		} else if ((audio = iks_new("content")) && (audio_transport = iks_new("transport"))) {
-			iks_insert_attrib(audio, "creator", session->outgoing ? "initiator" : "responder");
+			iks_insert_attrib(audio, "creator", JINGLE_CONTENT_CREATOR);
 			iks_insert_attrib(audio, "name", session->audio_name);
 			iks_insert_node(jingle, audio);
 			iks_insert_node(audio, audio_transport);
@@ -1308,7 +1316,7 @@ static void jingle_send_transport_info(struct jingle_session *session, const cha
 
 	if ((session->transport != JINGLE_TRANSPORT_GOOGLE_V1) && !res && session->vrtp) {
 		if ((video = iks_new("content")) && (video_transport = iks_new("transport"))) {
-			iks_insert_attrib(video, "creator", session->outgoing ? "initiator" : "responder");
+			iks_insert_attrib(video, "creator", JINGLE_CONTENT_CREATOR);
 			iks_insert_attrib(video, "name", session->video_name);
 			iks_insert_node(jingle, video);
 			iks_insert_node(video, video_transport);
@@ -1437,7 +1445,7 @@ static int jingle_add_content(struct jingle_session *session, iks *jingle, iks *
 	int res = 0;
 
 	if (session->transport != JINGLE_TRANSPORT_GOOGLE_V1) {
-		iks_insert_attrib(content, "creator", session->outgoing ? "initiator" : "responder");
+		iks_insert_attrib(content, "creator", JINGLE_CONTENT_CREATOR);
 		iks_insert_attrib(content, "name", name);
 		iks_insert_node(jingle, content);
 
