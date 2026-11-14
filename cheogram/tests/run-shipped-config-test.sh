@@ -1,6 +1,7 @@
 #!/bin/bash
 # Boots the image on its OWN /etc/asterisk plus the files a deployment supplies (startup/'s
-# pjsip, rtp and xmpp), so a shipped file that stops parsing fails here and not in a cluster.
+# pjsip, rtp, xmpp and motif), so a shipped file that stops parsing fails here, not in a
+# cluster.
 # Usage: run-shipped-config-test.sh <image>
 set -euo pipefail
 
