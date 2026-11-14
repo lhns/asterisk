@@ -6,6 +6,10 @@ on:
   push:
     branches:
       - '*-cheogram-dtls'
+  # Build and test only; the push and verify steps below are skipped for a PR.
+  pull_request:
+    branches:
+      - '*-cheogram-dtls'
   workflow_dispatch:
 
 permissions:
@@ -44,6 +48,10 @@ jobs:
 
       - name: Startup test
         run: cheogram/tests/run-startup-test.sh cheogram-asterisk:ci
+
+      # The shipped /etc/asterisk plus the test deployment's own files boots the same way.
+      - name: Startup test (shipped config)
+        run: cheogram/tests/run-shipped-config-test.sh cheogram-asterisk:ci
 
       - name: Jingle stanza test
         run: cheogram/tests/run-jingle-test.sh cheogram-asterisk:ci

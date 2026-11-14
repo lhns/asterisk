@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tier 2: the image actually boots and the patched modules reach Running.
-# Usage: run-startup-test.sh <image>
+# Usage: run-startup-test.sh <image> [config dir, default startup/]
 set -euo pipefail
 
 IMAGE=${1:?usage: run-startup-test.sh <image>}
@@ -11,7 +11,9 @@ cleanup() { docker rm -f "$CT" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
 
-docker run -d --name "$CT" -v "$HERE/startup:/etc/asterisk:ro" "$IMAGE" -f >/dev/null
+CONF=${2:-$HERE/startup}
+
+docker run -d --name "$CT" -v "$CONF:/etc/asterisk:ro" "$IMAGE" -f >/dev/null
 
 # The console is detached, so stdout stays empty: the log is the file.
 for _ in $(seq 1 60); do

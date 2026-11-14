@@ -36,7 +36,7 @@ RUN make -j"$(nproc)" ASTCFLAGS="$ASTCFLAGS" >/tmp/make.log 2>&1 \
 # compiled out. This is the check a rebase onto a new tag has to keep passing.
 RUN sh cheogram/tests/assert-modules.sh channels/chan_motif.so res/res_xmpp.so res/res_rtp_asterisk.so pbx/pbx_lua.so res/res_srtp.so
 # /var/run is a symlink on Debian, so shipping a real one breaks the runtime COPY.
-# /etc/asterisk goes because the deployment mounts a config over it.
+# /etc/asterisk goes because the shipped config below replaces the samples.
 RUN make install DESTDIR=/out >/dev/null && make samples DESTDIR=/out >/dev/null \
  && rm -rf /out/etc/asterisk /out/var/run
 
@@ -49,6 +49,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && groupadd -r asterisk && useradd -r -g asterisk -d /var/lib/asterisk asterisk
 COPY --from=build /out/ /
 COPY cheogram/tests/assert-modules.sh /usr/local/bin/assert-modules
+# The config that never varies per deployment: paths, logging, the module set and the
+# pjproject log mapping. A deployment supplies the rest (pjsip.conf, rtp.conf, xmpp.conf,
+# motif.conf, extensions) and overlays or copies these; it should not mount over the whole
+# directory without copying them first.
+COPY cheogram/etc/asterisk/ /etc/asterisk/
 RUN ldconfig \
  && mkdir -p /etc/asterisk /var/log/asterisk /var/spool/asterisk /var/run/asterisk \
  && chown -R asterisk:asterisk /var/log/asterisk /var/spool/asterisk /var/run/asterisk \
