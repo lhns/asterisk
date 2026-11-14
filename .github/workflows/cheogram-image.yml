@@ -6,6 +6,10 @@ on:
   push:
     branches:
       - '*-cheogram-dtls'
+  # Build and test only: the push and verify steps below are skipped for a PR.
+  pull_request:
+    branches:
+      - '*-cheogram-dtls'
   workflow_dispatch:
 
 permissions:
